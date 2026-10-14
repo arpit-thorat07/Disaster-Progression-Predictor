@@ -1,0 +1,19 @@
+Base target TIFFs: 40
+DEM TIFFs: 596
+ERA5 TIFFs: 596
+S1 TIFFs: 298
+GLOFAS NetCDF files: 298
+Target observations audited: 40
+
+dem_local_found: 40/40
+dem_context_found: 40/40
+era5_found: 40/40
+era5_land_found: 40/40
+glofas_found: 40/40
+prior_s1_found: 40/40
+target metadata errors: 0
+dem_local metadata errors: 0
+dem_context metadata errors: 0
+era5 metadata errors: 0
+era5_land metadata errors: 0
+s1 metadata errors: 0

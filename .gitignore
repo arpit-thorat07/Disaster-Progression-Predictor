@@ -1,0 +1,45 @@
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Raw datasets
+/GFF/
+/SEN12FLOOD/
+/TS-SatFire-selected/
+
+# Large generated data
+/data/raw/
+/data/processed/
+/data/interim/
+/processed_data/
+/checkpoints/
+/wandb/
+/mlruns/
+
+# Temporary files and caches
+*.tmp
+*.log
+.cache/
+__pycache__/
+
+# Quarantined corrupt files
+/audit/quarantine/
+
+# Local experiment outputs
+outputs/
+runs/
