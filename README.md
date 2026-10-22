@@ -1,940 +1,217 @@
 # Disaster Progression Predictor
 
-**A deep-learning framework for forecasting the spatiotemporal progression of floods and wildfires using remote-sensing data.**
+A deep-learning mini-project for predicting how **floods** and **wildfires** evolve from satellite observations. The two disaster types have separate datasets, models, and evaluation protocols; they can eventually share a user interface without sharing incompatible labels.
 
-> **Project status:** Dataset inventory and initial raster validation completed. Dataset alignment, flood-label verification, and temporal sequence preparation are in progress. Model training has not yet been documented as completed.
+**Current status (October 2026):** The flood branch has a trained GFF U-TAE baseline, a trained SEN12-FLOOD radar classifier, and a fine-tuned GFF + SEN12 feature-fusion model. A fixed-weight feature ablation has been evaluated on the GFF development-validation subset. **Held-out test evaluation, qualitative flood-map examples, a matched-budget training control, and the wildfire branch remain outstanding.**
 
----
+## Project at a glance
 
-## Table of Contents
+| Branch | Dataset | Task | Status |
+|---|---|---|---|
+| Flood forecast baseline | Global Flood Forecasting (GFF) | Predict a future two-class flood/water map from pre-event radar, terrain, and lead time | Trained and validated |
+| Radar feature pretraining | SEN12-FLOOD | Classify whether a Sentinel-1 acquisition is associated with flooding | Trained and validated |
+| Flood forecast with transfer learning | GFF + pretrained SEN12-FLOOD encoder | Predict a future flood/water map using auxiliary radar features | Trained, validated, and ablated |
+| Wildfire forecast | TS-SatFire | Predict future fire/burn extent from earlier observations | Assigned to wildfire workstream; implementation pending |
 
-1. [Project Overview](#1-project-overview)
-2. [Objectives](#2-objectives)
-3. [Proposed Model Architecture](#3-proposed-model-architecture)
-4. [Datasets](#4-datasets)
-5. [Current Project Progress](#5-current-project-progress)
-6. [Repository Structure](#6-repository-structure)
-7. [Technology Stack](#7-technology-stack)
-8. [Environment Setup](#8-environment-setup)
-9. [Dataset Organization](#9-dataset-organization)
-10. [Data Processing Pipeline](#10-data-processing-pipeline)
-11. [Experimental Design](#11-experimental-design)
-12. [Evaluation Metrics](#12-evaluation-metrics)
-13. [Next Plan of Action](#13-next-plan-of-action)
-14. [Team Collaboration](#14-team-collaboration)
-15. [Reproducibility and Data Leakage Prevention](#15-reproducibility-and-data-leakage-prevention)
-16. [Data Storage and Version Control](#16-data-storage-and-version-control)
-17. [Known Issues and Limitations](#17-known-issues-and-limitations)
-18. [References and Dataset Documentation](#18-references-and-dataset-documentation)
+## Flood models and results
 
----
+### 1. GFF U-TAE baseline
 
-## 1. Project Overview
+The baseline adapts the **official GFF U-TAE implementation** using the local modalities available in this project:
 
-Natural disasters such as floods and wildfires evolve over time and affect spatially connected regions. Predicting their future extent can support disaster monitoring, emergency planning, resource allocation, and risk assessment.
+- Pre-event Sentinel-1 **VV and VH** radar channels.
+- Local digital elevation model (**DEM**) and height above nearest drainage (**HAND**).
+- A land/sea indicator derived from DEM by the official model.
+- Forecast lead-time conditioning.
 
-The **Disaster Progression Predictor** aims to develop a spatiotemporal deep-learning framework that learns from historical observations and predicts future disaster-related spatial patterns.
+The GFF implementation assembles five spatial input channels and produces a **224 × 224 two-class prediction**. The reduced-input experiment does **not** use the paper's full environmental feature set, particularly ERA5/ERA5-Land weather inputs; its results should not be presented as a reproduction of the full published benchmark.
 
-The project focuses on two separate prediction pipelines:
+The original experiment ran for three epochs on a reproducibly sampled **1,024 training tiles** and **256 validation tiles**. The best checkpoint was from epoch 2 (stored with the zero-based checkpoint suffix `001`).
 
-- **Flood progression prediction:** Learning from flood-related observations, satellite imagery, terrain, weather, and hydrological information.
-- **Wildfire progression prediction:** Learning from chronological fire observations and associated environmental or land-cover information.
+### 2. SEN12-FLOOD radar classifier
 
-The intended system combines convolutional neural networks, recurrent spatial-temporal modeling, and graph neural networks.
+A lightweight RadarCNN learns from paired Sentinel-1 VV/VH acquisitions. A verified manifest contains **3,062 VV/VH pairs** across 234 location folders. The split is location-folder-disjoint: **2,134 train**, **486 validation**, and **442 test** acquisitions. The last set remains held out.
 
-The immediate priority is to validate the datasets, establish reliable target labels, construct temporally aligned training sequences, and establish baseline models before implementing the complete architecture.
+The classifier has approximately **97,905 parameters**, uses per-band signed-log compression and per-image 1st/99th-percentile scaling, and was trained for five epochs. Its best checkpoint is from epoch 2.
 
-### Prediction objective
+**Important distinction:** SEN12's `FLOODING` label is **acquisition-level**. The classifier is **not** itself a pixel-wise flood forecasting model. Its encoder supplies auxiliary radar features to GFF.
 
-Given observations from previous time steps,
+### 3. GFF + SEN12 feature fusion
 
-\[
-X_{t-k+1}, X_{t-k+2}, \ldots, X_t
-\]
+The combined approach loads both trained models, takes spatial features from the SEN12 encoder **before global pooling**, and uses a learnable `128 → 1` convolutional adapter. The adapted map is upsampled and appended as a sixth local input channel to GFF U-TAE.
 
-the model aims to predict a future spatial target:
+The first five channels of the expanded U-TAE convolution are initialized from the trained GFF baseline; the new sixth-channel weights are initialized to zero. Consequently, before fusion fine-tuning, the combined model's output exactly matched the GFF baseline on the tested tile.
 
-\[
-\hat{Y}_{t+h}=f(X_{t-k+1:t})
-\]
+During the three-epoch fusion experiment, the SEN12 encoder and most pretrained GFF weights were frozen. **513 of 1,399,171 parameters** were trainable: the adapter and the expanded first convolution's weights. This first convolution also allowed the original five channels' weights to change.
 
-where:
+### Development-validation results
 
-- \(X\) represents the available input modalities.
-- \(k\) is the number of historical observations.
-- \(h\) is the forecast horizon.
-- \(\hat{Y}_{t+h}\) is the predicted future disaster-related spatial map.
+The following results are from the **same sampled 256 GFF validation tiles**, not from the untouched held-out test partition. GFF scores are pixel-level class-wise F1 as computed by the official validation pipeline. The separate SEN12 score below is acquisition-level F1 and is **not directly comparable**.
 
-The precise prediction target—such as binary flood extent, multiclass flood-map labels, newly burned area, or cumulative burned area—must be established separately for each dataset.
+| GFF model | Overall F1 (macro across two classes) | Flood/water F1 | Background F1 | Validation loss |
+|---|---:|---:|---:|---:|
+| U-TAE baseline, best epoch | **0.7902** | **0.6620** | 0.9185 | 0.21329 |
+| Fine-tuned fusion model, SEN12 channel disabled | **0.8072** | **0.6888** | 0.9256 | 0.18569 |
+| Fine-tuned fusion model, SEN12 channel enabled | **0.9066** | **0.8417** | 0.9716 | 0.14797 |
 
----
+**SEN12 classifier:** Best validation acquisition-level F1 **0.6596**, accuracy **0.6708**, precision **0.5657**, recall **0.7908** (486 validation acquisitions).
 
-## 2. Objectives
+The within-checkpoint **SEN12-channel ablation** decreased GFF overall F1 by **9.94 percentage points** and flood/water F1 by **15.29 percentage points**. This shows that the trained fusion model uses the feature channel and that disabling it hurts this model on the sampled validation set. It does **not**, by itself, establish that SEN12 pretraining is better than a GFF-only model given an equivalent extra training budget: post-training removal of an input also changes the model's input distribution.
 
-### Primary objectives
+**Experiment limitations:** The initial GFF-only model was trained for three epochs, while the fusion model was initialized from its best checkpoint and trained for three **additional** epochs. A matched-budget GFF-only fine-tuning control is therefore required for a stronger comparison. None of the GFF figures above are final held-out test scores or published-paper benchmark scores. Generalization to unseen events, spatial overlap beyond the existing partition design, calibration, and performance across forecast horizons still require assessment.
 
-1. Build a reliable dataset pipeline for flood and wildfire progression.
-2. Analyze the temporal and spatial properties of the available observations.
-3. Integrate relevant satellite and environmental modalities.
-4. Develop CNN-based spatial feature extraction.
-5. Model temporal dependencies using ConvLSTM.
-6. Represent spatial relationships using graph neural networks.
-7. Predict future disaster-related spatial maps.
-8. Evaluate the model using appropriate spatial and classification metrics.
-9. Compare the proposed model against simpler baseline approaches.
-10. Produce reproducible experiments and visualizations for research and team collaboration.
+## Repository organization
 
-### Research questions
-
-- Can historical observations predict future flood or wildfire extent?
-- Does temporal modeling improve performance over single-observation baselines?
-- Does adding terrain, weather, hydrological, or land-cover information improve predictions?
-- Can graph-based spatial relationships improve modeling of disaster propagation?
-- How does prediction performance change with forecast horizon?
-- How well does the model generalize to unseen disaster events or regions?
-
----
-
-## 3. Proposed Model Architecture
-
-The planned architecture is:
-
-**CNN → ConvLSTM → GNN → Prediction Decoder**
-
-This architecture is a design target, not a claim that the complete model has already been implemented or trained.
-
-### 3.1 CNN — Spatial Feature Extraction
-
-The CNN encoder extracts spatial representations from input imagery and raster modalities.
-
-Potential inputs include:
-
-- Sentinel-1 radar imagery.
-- Flood-related spatial maps.
-- Elevation and terrain information.
-- Weather and hydrological features.
-- Land-cover information.
-
-The CNN converts each observation into a spatial feature representation suitable for downstream temporal modeling.
-
-### 3.2 ConvLSTM — Temporal Modeling
-
-ConvLSTM models the evolution of spatial features over successive observations.
-
-It is intended to capture:
-
-- Changes in disaster extent.
-- Spatial propagation patterns.
-- Temporal dependencies.
-- Relationships between previous and subsequent observations.
-
-Irregular observation intervals must be handled explicitly through timestamp-aware sequence construction, interval features, or carefully defined sampling rules.
-
-### 3.3 GNN — Spatial Relationship Modeling
-
-The graph neural network represents relationships between spatial regions or cells.
-
-Possible graph constructions include:
-
-- Adjacent raster patches.
-- Spatial grid neighborhoods.
-- Hydrologically connected regions.
-- Regions linked through geographic proximity.
-
-Node features, graph edges, and graph construction rules must be defined and validated before the GNN stage is implemented.
-
-### 3.4 Prediction Decoder
-
-The decoder transforms the learned representation into the desired future spatial output.
-
-Depending on the verified target format, this may be:
-
-- A binary flood-probability map.
-- A multiclass flood-extent map.
-- A newly burned-area map.
-- A cumulative burned-area map.
-
-The prediction head and loss function will depend on the selected target.
-
-### 3.5 Training strategy
-
-The proposed development sequence is:
-
-1. Validate data and labels.
-2. Implement simple baselines.
-3. Train the CNN-based baseline.
-4. Add temporal modeling with ConvLSTM.
-5. Add graph-based spatial modeling.
-6. Evaluate the combined architecture.
-7. Perform ablation studies and error analysis.
-
-This staged approach will make it easier to determine which components contribute to performance.
-
----
-
-## 4. Datasets
-
-The project currently contains three dataset collections.
-
-### 4.1 GFF — Flood Data
-
-**Local directory:** `GFF/`
-
-The GFF collection contains flood-related observations and environmental modalities.
-
-| Component | Contents |
-|---|---|
-| `base/` | Flood-related raster observations, metadata JSON files, and GeoPackages |
-| `dem/` | Local and contextual elevation rasters |
-| `era5/` | ERA5 and ERA5-Land raster products |
-| `glofas/` | Hydrological NetCDF files |
-| `s1/` | Sentinel-1 raster observations |
-
-Current inventory:
-
-| Component | Files |
-|---|---:|
-| Base | 927 |
-| DEM | 596 |
-| ERA5 | 596 |
-| GLOFAS | 298 |
-| Sentinel-1 | 298 |
-| **Total** | **2,715** |
-
-The base directory contains 298 TIFF observations and 298 corresponding metadata JSON files. The TIFFs include two metadata formats:
-
-- `kurosiwo`: 40 observations.
-- `generated`: 258 observations.
-
-The metadata includes fields such as `pre1_date`, `pre2_date`, `post_date`, `flooding`, `flooded_tiles`, and, for the richer format, additional flood-related metadata.
-
-The labels and temporal semantics are still being verified.
-
-### 4.2 SEN12-FLOOD
-
-**Local directory:** `SEN12FLOOD/`
-
-SEN12-FLOOD contains Sentinel-1 and Sentinel-2 imagery organized into sequence directories.
-
-Initial inventory:
-
-| Metric | Result |
-|---|---:|
-| Files | 28,035 |
-| TIFF files | 27,981 |
-| Other files | JSON, PNG, XML, and extensionless files |
-
-The dataset requires acquisition-level grouping of individual raster bands into coherent observations. Individual band files must not be treated as separate time steps when they belong to the same acquisition.
-
-Before using SEN12-FLOOD for future flood-extent forecasting, the availability and semantics of its labels must be checked. Dataset suitability for pixel-wise future prediction has not yet been established.
-
-#### Quarantined files
-
-Thirty-six TIFFs failed pixel-read validation and were moved to:
-
-`audit/quarantine/sen12flood_bad_tiffs/`
-
-Verification confirmed:
-
-- Flagged files: 36.
-- Quarantined: 36.
-- Remaining in original locations: 0.
-- Missing from both locations: 0.
-
-These files should remain quarantined until their source or recovery options are understood. They should not be used for training.
-
-### 4.3 TS-SatFire
-
-**Local directory:** `TS-SatFire-selected/`
-
-The selected TS-SatFire collection contains approximately 30 event directories.
-
-The initial inventory reported:
-
-| Metric | Result |
-|---|---:|
-| Files | 1,893 |
-| File type | TIFF |
-| Approximate size | 12.985 GB |
-
-The event directories contain products such as:
-
-- `FirePred`
-- `VIIRS_Day`
-- `VIIRS_Night`
-- `ESRI_LULC`
-
-The FirePred products are candidate targets for progression prediction. The exact label semantics must be verified before training.
-
-In particular, the pipeline must establish whether the target represents newly burned area between observations or cumulative burned area. These are different prediction tasks and must not be mixed.
-
-Dataset source repository:
-
-https://github.com/zhaoyutim/TS-SatFire
-
----
-
-## 5. Current Project Progress
-
-This section distinguishes completed work from preliminary findings and remaining tasks.
-
-### Phase 1 — Dataset Inventory
-
-**Status: Completed**
-
-The inventory script was executed successfully.
-
-Reports:
-
-- `audit/reports/step1_file_inventory.csv`
-- `audit/reports/step1_inventory_summary.json`
-
-Initial dataset inventory:
-
-| Dataset | Files | Approximate size |
-|---|---:|---:|
-| GFF | 2,715 | 28.03 GB |
-| SEN12-FLOOD | 28,035 | 13.789 GB |
-| TS-SatFire-selected | 1,893 | 12.985 GB |
-| **Total** | **32,643** | **54.80 GB** |
-
-These are the initial inventory figures; they are not the amount of free or occupied storage currently available on the machine.
-
-### Phase 2 — Raster Validation
-
-**Status: Initial validation completed**
-
-The raster validation script inspected 31,662 TIFF files.
-
-| Dataset | TIFFs inspected | Open errors | Pixel-sample errors |
-|---|---:|---:|---:|
-| GFF | 1,788 | 0 | 0 |
-| SEN12-FLOOD | 27,981 | 0 | 36 |
-| TS-SatFire-selected | 1,893 | 0 | 0 |
-| **Total** | **31,662** | **0** | **36** |
-
-All 31,662 TIFFs opened sufficiently for the initial metadata inspection. However, 36 SEN12-FLOOD files failed pixel sampling.
-
-A successful metadata open does not guarantee that the raster's pixel data can be read successfully.
-
-Reports:
-
-- `audit/reports/step2_raster_validation.csv`
-- `audit/reports/step2_raster_validation_summary.txt`
-- `audit/reports/step2_raster_errors.csv`
-- `audit/reports/step2_raster_recheck.csv`
-
-### Phase 3 — Failed TIFF Quarantine
-
-**Status: Completed**
-
-The 36 failed SEN12-FLOOD TIFFs were quarantined and the move was verified.
-
-No raw files outside the flagged list were intentionally removed.
-
-### Phase 4 — GFF Alignment Audit
-
-**Status: Partial; the initial report is incomplete**
-
-The first alignment script recognized 40 base observations using a filename pattern that did not cover the other 258 base observations.
-
-For those 40 recognized observations, the script found matching files for the selected DEM, ERA5, ERA5-Land, GLOFAS, and prior Sentinel-1 inputs.
-
-This does **not** establish complete alignment for all 298 base observations. The filename parser must be corrected before the alignment report can be considered complete.
-
-The current report is:
-
-`audit/reports/step4_gff_alignment.csv`
-
-### Phase 5 — GFF Metadata Audit
-
-**Status: Completed for metadata parsing**
-
-The metadata audit examined all 298 base TIFFs and their JSON files.
-
-| Check | Result |
-|---|---:|
-| Base TIFFs | 298 |
-| Metadata files found | 298 |
-| Metadata parsing errors | 0 |
-| `kurosiwo` observations | 40 |
-| `generated` observations | 258 |
-| `flooding: true` | 88 |
-| `flooding: false` | 210 |
-
-Report:
-
-`audit/reports/step6_gff_base_metadata.csv`
-
-The `flooding` counts represent metadata fields, not yet independently verified pixel-level ground-truth counts.
-
-### Phase 6 — Initial Label Inspection
-
-**Status: Preliminary investigation**
-
-Small windows were sampled from six representative GFF rasters.
-
-Observed characteristics:
-
-- The sampled rasters use `uint8` pixel data.
-- The inspected rasters report `255` as NoData.
-- Some valid sampled windows contain values such as `0`, `2`, and `3`.
-- Some windows contain no valid pixels, while other windows of the same raster contain valid data.
-- At least one generated observation returned no valid pixels in three sampled windows.
-
-These results do not prove that the corresponding complete rasters are corrupt or empty. The meaning of the pixel values and the relationship between raster masks and metadata labels remain to be verified.
-
-The following scripts support this investigation:
-
-- `audit/scripts/gff_label_sample.py`
-- `audit/scripts/gff_masked_window_check.py`
-
-### Overall status
-
-The project has completed its initial dataset inventory, raster metadata inspection, failed-file quarantine, and GFF metadata parsing.
-
-The next milestone is to produce a complete, trustworthy alignment and label audit before constructing training sequences.
-
-No completed model training, final evaluation metrics, or validated model-ready temporal dataset is claimed in this README.
-
----
-
-## 6. Repository Structure
-
-The intended repository structure is:
+The intended layout for the cleaned GitHub flood branch is:
 
 ```text
 Disaster-Progression-Predictor/
 ├── README.md
 ├── requirements.txt
 ├── .gitignore
-├── .env.example
-│
-├── audit/
-│   ├── scripts/
-│   │   ├── inventory.py
-│   │   ├── raster_validation.py
-│   │   ├── recheck_failed_rasters.py
-│   │   ├── diagnose_tiff_failures.py
-│   │   ├── gff_alignment_audit.py
-│   │   ├── gff_base_metadata_audit.py
-│   │   ├── gff_label_sample.py
-│   │   └── gff_masked_window_check.py
-│   ├── reports/
-│   └── quarantine/
-│
-├── configs/
-│   ├── flood.yaml
-│   └── wildfire.yaml
-│
-├── manifests/
-│   ├── gff_manifest.csv
-│   ├── wildfire_manifest.csv
-│   └── split_assignments.csv
-│
-├── src/
+├── flood/
+│   ├── configs/
+│   │   ├── mini_project_utae.yml
+│   │   ├── config_utae.yml
+│   │   └── config_sen12.yml
 │   ├── data/
-│   │   ├── dataset.py
-│   │   ├── preprocessing.py
-│   │   └── sequence_builder.py
+│   │   ├── sen12_manifest.csv
+│   │   ├── sen12_splits.csv
+│   │   ├── subset_indices.json
+│   │   ├── GFF_official_view/       # external dataset, not committed
+│   │   └── SEN12FLOOD/             # external dataset, not committed
 │   ├── models/
-│   │   ├── cnn_encoder.py
-│   │   ├── convlstm.py
-│   │   ├── gnn.py
-│   │   └── predictor.py
-│   └── training/
-│       ├── train.py
-│       └── evaluate.py
-│
-├── tests/
-├── notebooks/
-├── docs/
-└── artifacts/
-    └── README.md
+│   │   ├── gff_utae_best.th
+│   │   ├── gff_sen12_fusion_best.th
+│   │   └── sen12_classifier_best.pt
+│   ├── reports/
+│   │   ├── experiment.json
+│   │   ├── sen12_ablation_results.json
+│   │   └── sen12_classifier_history.json
+│   ├── gff/                       # official GFF source package
+│   ├── sen12_build_manifest.py
+│   ├── sen12_create_splits.py
+│   ├── train_sen12_classifier.py
+│   ├── train_mini_project.py
+│   ├── test_fused_flood_model.py
+│   ├── train_fused_flood_model.py
+│   ├── check_sen12_contribution.py
+│   └── evaluate_sen12_ablation.py
+└── wildfire/
 ```
 
-**Note:** this is the target structure, not a claim that every directory and source file already exists. The audit scripts and reports listed in the current progress section are the existing work; the model implementation and manifests are planned additions.
+This is the **target layout**, not confirmation that all moved scripts have been tested in place. Source code may still need imports and config references updated after relocation. Preserve the official GFF source structure and its license/attribution; do not silently present it as original team code.
 
----
+The two GFF checkpoint files in the original run directories were named `checkpoint_001.th` (baseline) and `checkpoint_002.th` (fusion). When moving them into `flood/models/`, use the clearer filenames shown above and update all loading paths accordingly. Original training configs, manifests, and subset indices should be retained to document provenance.
 
-## 7. Technology Stack
+## Installation and data setup
 
-The planned technology stack is:
+### Python environment
 
-| Component | Technology |
-|---|---|
-| Programming language | Python |
-| Numerical computing | NumPy |
-| Tabular data and manifests | Pandas |
-| Raster reading and geospatial metadata | Rasterio, GDAL |
-| Scientific data | xarray and/or NetCDF4, subject to availability |
-| Deep learning | PyTorch |
-| Spatial feature extraction | CNN |
-| Temporal modeling | ConvLSTM |
-| Graph modeling | PyTorch Geometric or another compatible graph framework |
-| Evaluation | Scikit-learn |
-| Visualization | Matplotlib |
-| Experiment tracking | Weights & Biases, optional |
-| Version control | Git and GitHub |
+Python, Git, and the packages in `requirements.txt` are required. The flood experiments were developed with Python 3.13 and CUDA-enabled PyTorch on an NVIDIA RTX 3050 Laptop GPU; equivalent hardware is **not** guaranteed, and CUDA/PyTorch compatibility is machine-dependent.
 
-Only the dependencies required by the current audit should be installed initially. The full model dependencies can be added as implementation progresses.
-
----
-
-## 8. Environment Setup
-
-### Prerequisites
-
-- Python compatible with the selected dependency versions.
-- Git.
-- Sufficient disk space for the selected dataset and preprocessing outputs.
-- Optional CUDA-compatible GPU and supported PyTorch/CUDA configuration.
-
-The current development machine has been using Python 3.13. Model and geospatial dependency compatibility should be tested before fixing the project's final Python version.
-
-### Create a virtual environment
-
-Windows PowerShell:
-
-```powershell
-cd "C:\Disaster Progression Dataset"
-
+```bash
+git clone <repository-url>
+cd Disaster-Progression-Predictor
 python -m venv .venv
-
-.\.venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip
-```
-
-If PowerShell blocks activation, use the environment's Python executable directly:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-```
-
-### Install audit dependencies
-
-Create or update `requirements.txt` with the dependencies currently needed:
-
-```text
-numpy>=1.26,<3.0
-pandas>=2.1,<4.0
-rasterio>=1.3.9,<2.0
-```
-
-Then install:
-
-```powershell
 python -m pip install -r requirements.txt
 ```
 
-Verify the installation:
+Activate the environment if desired (`.venv\Scripts\Activate.ps1` in Windows PowerShell or `source .venv/bin/activate` on Linux/macOS), or run scripts via the virtual environment's Python executable. Install a suitable CPU or CUDA PyTorch build for the target machine. The original official GFF package may have additional dependencies; validate the environment with the retained `gff/` source rather than assuming installation is sufficient.
 
-```powershell
-python -c "import numpy, pandas, rasterio; print('Dependencies OK')"
+### External datasets
+
+**Raw satellite imagery is intentionally not stored in Git.** Cloning the repository is sufficient to obtain the source, manifests, and any committed model checkpoints, but **not** to retrain or run an inference example that requires external rasters.
+
+- **GFF:** Obtain the GFF dataset and prepare the layout expected by the official loader: `flood/data/GFF_official_view/rois/`, `partitions/`, and `normalisation/`. The local training dataset used an official-loader-compatible view of 298 GFF observations; this view must be recreated for a new machine.
+- **SEN12-FLOOD:** Obtain the raster dataset and place location folders under `flood/data/SEN12FLOOD/`. Build or reuse the manifest and folder-disjoint split files, checking that all CSV-relative paths resolve correctly.
+- **TS-SatFire:** The wildfire teammate should document their independently acquired dataset and target folder in `wildfire/README.md`.
+
+The checked-in paths should be resolved relative to the script or the repository directory, **not** to a developer-specific `C:\...` location. GFF YAML `data_folder` settings must be resolved consistently with Python path handling. Do not assume an arbitrary working directory. The prepared data and original runs are not redistributed as part of this README.
+
+### Flood commands
+
+From the repository root (after setting up the required data and Python environment):
+
+```bash
+# Build the SEN12 manifest and location-folder splits
+python flood/sen12_build_manifest.py
+python flood/sen12_create_splits.py
+
+# Train from scratch only when output checkpoints do not already exist
+python flood/train_sen12_classifier.py
+python flood/train_mini_project.py
+
+# Check integration or evaluate an already trained fused model
+python flood/test_fused_flood_model.py
+python flood/check_sen12_contribution.py
+python flood/evaluate_sen12_ablation.py
 ```
 
-These are initial audit dependencies, not a finalized model-training requirements file. Additional packages will be added and pinned after testing the model environment.
+`train_fused_flood_model.py` performs additional GFF fine-tuning after loading the original GFF and SEN12 checkpoints. It must be run only after checking its output directory, checkpoint references, and GFF configuration. The original SEN12 training script deliberately prevents overwriting an existing model checkpoint. These commands describe the intended workflow; **end-to-end execution from a freshly cloned, reorganized repository has not yet been verified**.
 
----
+### Checkpoints and portability
 
-## 9. Dataset Organization
+Pretrained weights can be versioned separately when they are too large for normal Git hosting. If a checkpoint is distributed externally, document the source URL, expected filename, checksum, and destination rather than claiming it is provided in the clone. A checkpoint alone cannot reproduce the dataset or its preprocessing.
 
-The raw datasets currently reside outside the proposed Git repository structure.
+## Wildfire workstream
 
-Example local organization:
+The wildfire branch is a **separate implementation**, using **TS-SatFire** rather than GFF or SEN12-FLOOD. Its output should ultimately be consistent with the flood branch at the application-interface level, not by forcing both disasters into the same network architecture.
+
+### Dataset and target definition
+
+1. Obtain TS-SatFire from its official source: https://github.com/zhaoyutim/TS-SatFire. Keep the raw imagery outside Git.
+2. Inventory the available events, dates, bands, coordinate systems, raster sizes, NoData masks, and class values. The initial local selection contained approximately **30 event folders** and imagery including **FirePred**, **VIIRS_Day**, **VIIRS_Night**, and **ESRI_LULC**; treat these as a starting inventory, not a validated ready-made sequence dataset.
+3. Read the source documentation and inspect actual labels to establish whether `FirePred` means active fire, newly burned area, cumulative burn extent, or something else. **Do not assume the target semantics.** Record the unit of prediction and the intended lead time.
+4. Construct sequences using only timestamps **before** each target date. Ensure that VIIRS and land-cover observations are available by the prediction cutoff. Handle irregular observation gaps explicitly.
+5. Split by **whole fire event or geographic area** before creating overlapping windows; avoid placing nearby frames of the same fire into both training and validation/test sets.
+
+### Suggested implementation order
+
+1. Implement a minimal dataset loader and inspect real input/target image pairs.
+2. Train a straightforward baseline (persistence, where appropriate, or a compact CNN/U-Net). Report class imbalance and valid-pixel coverage.
+3. Add a temporal model (ConvLSTM or another justified sequence model) only once the baseline and temporal labels are sound. GNN work is **optional research extension**, not a prerequisite for delivery.
+4. Choose the best model on a fixed validation split; run the test set once for final reporting.
+5. Produce at least one side-by-side visualization of historical inputs, ground truth and forecast, including the date and forecast horizon.
+6. Record model configuration, random seed, dataset/split manifests, training history, metrics, and limitations.
+
+### Expected files from the wildfire teammate
 
 ```text
-C:\Disaster Progression Dataset\
-├── GFF\
-├── SEN12FLOOD\
-├── TS-SatFire-selected\
-├── audit\
-│   ├── scripts\
-│   ├── reports\
-│   └── quarantine\
-└── requirements.txt
+wildfire/
+├── README.md                 # data source, target semantics, setup
+├── configs/                 # reproducible experiment parameters
+├── data/                    # small manifests/split files only
+├── models/                  # model code; checkpoints if distributable
+├── reports/                 # validation/test metrics and examples
+├── prepare_data.py
+├── train.py
+├── evaluate.py
+└── predict.py
 ```
 
-The exact project-root arrangement should be standardized before the preprocessing pipeline is finalized.
+The exact Python filenames are flexible; the **interfaces and documentation** matter. Make sure the entry points accept configurable dataset/model paths and do not reference personal drives.
 
-### Path configuration
+### Integration contract
 
-Training scripts should not hard-code a developer-specific absolute path.
+Once both branches are ready, each should expose an inference path accepting an observation or prepared tensor and forecast horizon, and returning:
 
-Instead, configure a dataset root through a local configuration file or environment variable.
+- A **spatial prediction map** (with class/probability semantics documented).
+- Geospatial metadata and target horizon where supported.
+- Model identifier and preprocessing version.
+- A clear indication of whether the model is a flood or wildfire forecaster.
 
-For example:
+The application can offer a disaster-type selector, but should **not** combine flood F1 and wildfire F1 into a single model-quality number. Keep model-specific evaluation methods, test sets, and claims separate.
 
-```text
-DATA_ROOT=C:\Disaster Progression Dataset
-```
+### Git collaboration
 
-Do not commit machine-specific paths if the repository is intended for multiple teammates.
+Develop wildfire changes in a branch, e.g. `feature/wildfire-pipeline`, and open a pull request. Avoid changing the flood branch without coordination. Add installation notes, a minimal smoke-test command, and sample output to `wildfire/README.md`. Do not commit downloaded imagery, caches, virtual environments, sensitive machine paths, or massive intermediary files.
 
-### Manifests
+## Evaluation protocol and remaining work
 
-Each dataset manifest should include, where applicable:
-
-- Observation or event identifier.
-- ROI or spatial region identifier.
-- Acquisition timestamp.
-- Target timestamp.
-- Input modality paths.
-- Target-map path.
-- Dimensions, band count, CRS, and spatial bounds.
-- Label metadata and NoData definition.
-- Temporal gap between observations.
-- Dataset split.
-- Validation status.
-- Preprocessing version.
-
-Manifest paths should be relative to the configured dataset root.
-
----
-
-## 10. Data Processing Pipeline
-
-The intended processing workflow is:
-
-### Stage 1 — Inventory and integrity checks
-
-- Enumerate the dataset files.
-- Identify file types and sizes.
-- Validate raster metadata.
-- Test representative pixel reads.
-- Record unreadable or suspicious files.
-
-### Stage 2 — Metadata and label validation
-
-- Parse metadata JSON files.
-- Identify target dates and historical observation dates.
-- Verify flood and wildfire label semantics.
-- Investigate NoData values.
-- Determine whether labels are binary, categorical, or continuous.
-- Document invalid and excluded observations.
-
-### Stage 3 — Temporal and spatial alignment
-
-- Match observations by event or ROI.
-- Associate each target with the correct historical inputs.
-- Verify spatial bounds, CRS, resolution, and pixel-grid alignment.
-- Record acquisition intervals.
-- Confirm that all required modalities are available.
-
-A matching ROI identifier alone is not sufficient to establish spatial or temporal alignment.
-
-### Stage 4 — Preprocessing
-
-- Apply consistent raster transformations.
-- Normalize continuous input features using training data only.
-- Preserve categorical label values and NoData masks.
-- Define a common spatial grid or an appropriate patch-based representation.
-- Record every transformation in the preprocessing configuration.
-
-### Stage 5 — Sequence generation
-
-For each valid event or ROI, construct sequences such as:
-
-```text
-Historical observation 1
-        ↓
-Historical observation 2
-        ↓
-Historical observation 3
-        ↓
-Target future observation
-```
-
-The number of historical observations and forecast horizon will be selected based on the dataset's temporal structure.
-
-### Stage 6 — Training-ready artifacts
-
-Generate:
-
-- Dataset manifests.
-- Train/validation/test split assignments.
-- Small sanity-check samples.
-- Sequence indexes.
-- Preprocessing metadata.
-
-Large intermediate rasters should be stored outside normal Git history.
-
----
-
-## 11. Experimental Design
-
-Flood and wildfire experiments will be developed separately.
-
-### 11.1 Flood pipeline
-
-Candidate inputs:
-
-- Sentinel-1 observations.
-- DEM and terrain features.
-- ERA5 and ERA5-Land weather features.
-- GLOFAS hydrological features.
-- Historical flood-related maps, where valid and appropriate.
-
-Candidate target:
-
-- Future flood extent or a verified flood-related spatial label.
-
-The exact target definition, temporal horizon, and suitable subset of GFF observations remain to be finalized.
-
-SEN12-FLOOD may provide complementary data, but its suitability for pixel-wise future flood prediction must be verified rather than assumed.
-
-### 11.2 Wildfire pipeline
-
-Candidate inputs:
-
-- Historical FirePred products.
-- VIIRS Day and Night products.
-- Land-cover information.
-- Additional environmental features where available and appropriately aligned.
-
-Candidate targets:
-
-- Newly burned area.
-- Cumulative burned area.
-
-The two targets must be treated as separate prediction formulations.
-
-### 11.3 Baseline models
-
-Before training the full architecture, establish baselines such as:
-
-1. Persistence baseline using the most recent valid observation.
-2. CNN-based spatial baseline.
-3. CNN + ConvLSTM temporal baseline.
-4. CNN + ConvLSTM + GNN full model.
-
-The persistence baseline is important because disaster extent can be spatially persistent over short forecast horizons.
-
-### 11.4 Ablation studies
-
-After the full model is operational, evaluate:
-
-- CNN only.
-- CNN + ConvLSTM.
-- CNN + GNN.
-- CNN + ConvLSTM + GNN.
-- Multimodal versus reduced-modality input configurations.
-
-These experiments will help determine whether temporal and graph components provide meaningful improvements.
-
----
-
-## 12. Evaluation Metrics
-
-Metrics will be selected according to the target representation and the intended use.
-
-### For binary spatial maps
-
-- Intersection over Union (IoU).
-- Dice coefficient.
-- Precision.
-- Recall.
-- F1-score.
-- Precision-recall curves.
-
-### For probabilistic predictions
-
-- Binary cross-entropy.
-- Brier score.
-- Calibration analysis.
-
-### For multiclass maps
-
-- Per-class IoU.
-- Macro-F1.
-- Confusion matrix.
-- Class-wise precision and recall.
-
-### For progression prediction
-
-- Metrics at each forecast horizon.
-- Spatial error visualizations.
-- Comparison against the persistence baseline.
-- Performance on unseen events or regions.
-
-Overall accuracy should not be used alone when flood or burned pixels are rare. Metrics must be reported on held-out data and should reflect class imbalance and spatial prediction quality.
-
-No model performance values are reported yet because a completed, validated training and evaluation run has not been established in the current project status.
-
----
-
-## 13. Next Plan of Action
-
-The following roadmap prioritizes data correctness before computationally expensive training.
-
-### Phase A — Complete dataset auditing
-
-**Status: In progress**
-
-- [x] Inventory all three dataset collections.
-- [x] Validate raster opening and basic metadata.
-- [x] Identify and quarantine 36 unreadable SEN12-FLOOD TIFFs.
-- [x] Parse metadata for all 298 GFF base observations.
-- [x] Inspect representative GFF label windows.
-- [ ] Correct the GFF filename parser to support both `kurosiwo` and `generated` observations.
-- [ ] Re-run GFF alignment for all 298 base observations.
-- [ ] Investigate missing georeferencing warnings.
-- [ ] Verify pixel-label semantics and NoData handling.
-- [ ] Produce a final dataset audit summary.
-
-**Deliverable:** A validated dataset manifest and documented exclusions.
-
-### Phase B — Finalize prediction targets
-
-- [ ] Define the flood target representation.
-- [ ] Decide which GFF observations are valid training candidates.
-- [ ] Verify whether SEN12-FLOOD supplies suitable future pixel-level labels.
-- [ ] Determine whether TS-SatFire targets represent new burns or cumulative burned area.
-- [ ] Define forecast horizons and acceptable temporal gaps.
-
-**Deliverable:** A target specification for each dataset.
-
-### Phase C — Build aligned temporal sequences
-
-- [ ] Match historical observations with future targets.
-- [ ] Align spatial grids and verify CRS and bounds.
-- [ ] Define a consistent tensor representation.
-- [ ] Preserve NoData masks.
-- [ ] Generate sequence manifests.
-- [ ] Split by event or ROI before generating overlapping windows.
-- [ ] Inspect sample sequences visually.
-
-**Deliverable:** Reproducible, model-ready sequence indexes and preprocessing outputs.
-
-### Phase D — Establish baselines
-
-- [ ] Implement the persistence baseline.
-- [ ] Train and evaluate a CNN baseline.
-- [ ] Add ConvLSTM temporal modeling.
-- [ ] Record experiments and configurations.
-- [ ] Evaluate using appropriate spatial metrics.
-
-**Deliverable:** Baseline results for comparison with the full model.
-
-### Phase E — Implement the proposed architecture
-
-- [ ] Define the graph representation.
-- [ ] Implement the GNN module.
-- [ ] Integrate CNN spatial features, ConvLSTM temporal features, and graph features.
-- [ ] Implement the prediction decoder.
-- [ ] Define losses and training configuration.
-- [ ] Validate model shapes and gradient flow.
-- [ ] Train on the training split.
-- [ ] Select configurations using validation data.
-
-**Deliverable:** A working CNN → ConvLSTM → GNN prediction model.
-
-### Phase F — Evaluate and improve
-
-- [ ] Evaluate on held-out events or regions.
-- [ ] Compare against baseline models.
-- [ ] Perform modality and architecture ablations.
-- [ ] Investigate false positives and false negatives.
-- [ ] Analyze performance across forecast horizons.
-- [ ] Document limitations and failure cases.
-
-**Deliverable:** Reproducible evaluation results and visualizations.
-
-### Phase G — Collaboration and research documentation
-
-- [ ] Finalize the README and dataset documentation.
-- [ ] Version the manifests and split assignments.
-- [ ] Store model configurations and checkpoints appropriately.
-- [ ] Document dataset licensing and access instructions.
-- [ ] Prepare research figures and a progress presentation.
-
-**Deliverable:** A reproducible project repository suitable for collaborative development and research reporting.
-
----
-
-## 14. Team Collaboration
-
-The project is intended to support parallel development after the data interface and target definitions have been stabilized.
-
-Possible work allocation:
-
-| Workstream | Responsibilities |
-|---|---|
-| Dataset and preprocessing | Data validation, manifests, alignment, sequence generation |
-| Spatial encoder | CNN implementation and spatial feature extraction |
-| Temporal modeling | ConvLSTM implementation and temporal experiments |
-| Graph modeling | Graph construction and GNN implementation |
-| Training and evaluation | Training loops, metrics, visualization, experiment tracking |
-| Integration | Model interfaces, configuration, testing, documentation |
-
-These are suggested responsibilities, not a record of assigned team members.
-
-### Collaboration conventions
-
-- Use Git branches for individual features.
-- Open pull requests for substantial changes.
-- Keep data paths configurable.
-- Record preprocessing and training configurations.
-- Avoid committing raw datasets or large generated files.
-- Share dataset manifests and reproducible instructions.
-- Use the same split assignments across model comparisons.
-
----
-
-## 15. Reproducibility and Data Leakage Prevention
-
-Data leakage is a major risk in disaster-progression forecasting because many observations can originate from the same event or spatial region.
-
-The following rules will be applied:
-
-1. Split by whole event or ROI before generating overlapping temporal windows.
-2. Do not allow windows from the same held-out event to appear in training.
-3. Fit normalization parameters using the training split only.
-4. Use validation data for model selection.
-5. Keep the test split untouched until final evaluation.
-6. Record random seeds, configuration files, dependency versions, and split assignments.
-7. Track the source and timestamps of every input and target.
-8. Ensure that no future observation is inadvertently included in historical input features.
-9. Keep flood and wildfire evaluation protocols separate unless a shared evaluation is explicitly justified.
-
-Because observation timestamps may be irregular, the pipeline should record the time difference between successive observations and the target horizon.
-
----
-
-## 16. Known Issues and Limitations
-
-The following issues remain open:
-
-1. **Incomplete GFF alignment report:** the current script recognized only 40 of 298 base observations. The filename parser must be corrected before the alignment report is trusted.
-2. **Unverified label semantics:** sampled GFF pixel values include `0`, `2`, and `3`; their exact meanings need confirmation.
-3. **NoData interpretation:** `255` is reported as NoData in sampled GFF rasters. Masked windows do not establish that an entire raster is empty.
-4. **Spatial consistency:** CRS, bounds, resolution, and pixel-grid alignment need to be verified across the selected modalities.
-5. **Temporal consistency:** historical inputs and targets may have different acquisition dates. Forecast horizons must be explicitly defined.
-6. **SEN12-FLOOD labels:** suitability for pixel-wise future flood forecasting remains unverified.
-7. **Wildfire target semantics:** newly burned area versus cumulative burned area must be resolved before training.
-8. **Model implementation:** the full CNN → ConvLSTM → GNN architecture has not yet been documented as completed.
-9. **Performance evaluation:** no validated baseline or full-model results are currently reported.
-10. **Compute and storage:** large-scale preprocessing and model training must account for available SSD capacity and hardware.
-
-These limitations will be resolved in the order described in the roadmap.
-
----
-
-## 17. References and Dataset Documentation
-
-- **TS-SatFire repository:** https://github.com/zhaoyutim/TS-SatFire
-- **SEN12-FLOOD:** Consult the original dataset documentation for acquisition structure, labels, permitted use, and redistribution terms.
-- **GFF:** Consult the original dataset documentation and metadata schema to verify flood-map values, observation semantics, and licensing.
-
-Dataset descriptions in this README reflect the files inspected locally. Source-specific definitions and license terms should be confirmed against the authoritative dataset documentation before publication or redistribution.
-
----
-
-## Project Status Summary
-
-The project has completed the initial dataset inventory, raster metadata checks, quarantine of 36 unreadable SEN12-FLOOD TIFFs, and parsing of all 298 GFF base metadata files.
-
-The immediate priority is to complete the GFF alignment and label audit, define valid prediction targets, and construct leakage-free temporal sequences. Baseline experiments will follow, before the full CNN → ConvLSTM → GNN architecture is trained and evaluated.
-
-**The next major milestone is a validated, reproducible dataset pipeline—not a claimed model accuracy.**
+- **GFF:** Report per-class F1, macro-F1, official validation loss, and ideally flood IoU, per-event results, and representative predicted/actual maps. Respect the official ignored-pixel handling.
+- **SEN12 classifier:** Report acquisition-level accuracy, precision, recall, F1, and class balance separately from GFF segmentation/forecast scores.
+- **Wildfire:** Select metrics after verifying label semantics; likely spatial IoU/F1 and horizon-specific evaluation, alongside persistence comparison where meaningful.
+- **Comparability:** Compare models on the same split and tiles, with matching label masks, forecast horizons, and training budgets.
+- **Outstanding flood experiments:** Matched-extra-epochs GFF-only control, true validation contribution check on several locations beyond the current subset, output visualizations, untouched held-out test evaluation, and a clean-clone reproducibility test.
+- **Potential leakage:** Folder-disjoint SEN12 acquisitions do not automatically prove different spatial events; check event/region overlap explicitly. GFF's original published setup may use retrospective weather reanalysis, but the reduced-input mini-project configuration excludes weather channels, limiting this particular risk. Forecast-time assumptions still need documentation.
