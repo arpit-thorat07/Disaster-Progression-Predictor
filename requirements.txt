@@ -1,4 +1,31 @@
+# Deep learning
+torch==2.11.0
+torchvision==0.26.0
+torchmetrics==1.9.0
+tensorboard
 
-numpy>=1.26,<3.0
-pandas>=2.1,<4.0
-rasterio>=1.3.9,<2.0
+# Scientific computing
+numpy
+pandas
+scipy
+scikit-learn
+
+# Satellite imagery and geospatial data
+rasterio
+shapely
+geopandas
+pyproj
+
+# Model utilities
+PyYAML
+tqdm
+einops
+
+# Data handling
+xarray
+netCDF4
+h5py
+
+# Visualization
+matplotlib
+Pillow
