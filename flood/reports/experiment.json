@@ -1,0 +1,15 @@
+{
+  "experiment": "SEN12 feature fusion",
+  "baseline_run": "models/gff_utae_best.th",
+  "epochs": 3,
+  "seed": 6426452,
+  "train_tiles": 1024,
+  "validation_tiles": 256,
+  "sen12_encoder": "frozen",
+  "gff_backbone": "frozen_except_input_conv",
+  "trainable_parts": [
+    "fusion_adapter",
+    "utae_first_convolution"
+  ],
+  "note": "Original GFF and SEN12 checkpoints are not overwritten."
+}

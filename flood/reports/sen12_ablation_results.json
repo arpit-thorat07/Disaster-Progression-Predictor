@@ -1,0 +1,18 @@
+{
+  "checkpoint": "models/gff_sen12_fusion_best.th",
+  "validation_tiles": 256,
+  "sen12_enabled": {
+    "loss": 0.1479683220386505,
+    "background_f1": 0.9715573191642761,
+    "flood_water_f1": 0.8416605591773987,
+    "overall_f1": 0.9066089391708374,
+    "confusion_matrix": "MulticlassConfusionMatrix()"
+  },
+  "sen12_disabled": {
+    "loss": 0.18568630516529083,
+    "background_f1": 0.9256215691566467,
+    "flood_water_f1": 0.6887843012809753,
+    "overall_f1": 0.807202935218811,
+    "confusion_matrix": "MulticlassConfusionMatrix()"
+  }
+}
