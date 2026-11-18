@@ -154,64 +154,11 @@ python flood/evaluate_sen12_ablation.py
 
 Pretrained weights can be versioned separately when they are too large for normal Git hosting. If a checkpoint is distributed externally, document the source URL, expected filename, checksum, and destination rather than claiming it is provided in the clone. A checkpoint alone cannot reproduce the dataset or its preprocessing.
 
-## Wildfire workstream
-
-The wildfire branch is a **separate implementation**, using **TS-SatFire** rather than GFF or SEN12-FLOOD. Its output should ultimately be consistent with the flood branch at the application-interface level, not by forcing both disasters into the same network architecture.
-
-### Dataset and target definition
-
-1. Obtain TS-SatFire from its official source: https://github.com/zhaoyutim/TS-SatFire. Keep the raw imagery outside Git.
-2. Inventory the available events, dates, bands, coordinate systems, raster sizes, NoData masks, and class values. The initial local selection contained approximately **30 event folders** and imagery including **FirePred**, **VIIRS_Day**, **VIIRS_Night**, and **ESRI_LULC**; treat these as a starting inventory, not a validated ready-made sequence dataset.
-3. Read the source documentation and inspect actual labels to establish whether `FirePred` means active fire, newly burned area, cumulative burn extent, or something else. **Do not assume the target semantics.** Record the unit of prediction and the intended lead time.
-4. Construct sequences using only timestamps **before** each target date. Ensure that VIIRS and land-cover observations are available by the prediction cutoff. Handle irregular observation gaps explicitly.
-5. Split by **whole fire event or geographic area** before creating overlapping windows; avoid placing nearby frames of the same fire into both training and validation/test sets.
-
-### Suggested implementation order
-
-1. Implement a minimal dataset loader and inspect real input/target image pairs.
-2. Train a straightforward baseline (persistence, where appropriate, or a compact CNN/U-Net). Report class imbalance and valid-pixel coverage.
-3. Add a temporal model (ConvLSTM or another justified sequence model) only once the baseline and temporal labels are sound. GNN work is **optional research extension**, not a prerequisite for delivery.
-4. Choose the best model on a fixed validation split; run the test set once for final reporting.
-5. Produce at least one side-by-side visualization of historical inputs, ground truth and forecast, including the date and forecast horizon.
-6. Record model configuration, random seed, dataset/split manifests, training history, metrics, and limitations.
-
-### Expected files from the wildfire teammate
-
-```text
-wildfire/
-├── README.md                 # data source, target semantics, setup
-├── configs/                 # reproducible experiment parameters
-├── data/                    # small manifests/split files only
-├── models/                  # model code; checkpoints if distributable
-├── reports/                 # validation/test metrics and examples
-├── prepare_data.py
-├── train.py
-├── evaluate.py
-└── predict.py
-```
-
-The exact Python filenames are flexible; the **interfaces and documentation** matter. Make sure the entry points accept configurable dataset/model paths and do not reference personal drives.
-
-### Integration contract
-
-Once both branches are ready, each should expose an inference path accepting an observation or prepared tensor and forecast horizon, and returning:
-
-- A **spatial prediction map** (with class/probability semantics documented).
-- Geospatial metadata and target horizon where supported.
-- Model identifier and preprocessing version.
-- A clear indication of whether the model is a flood or wildfire forecaster.
-
-The application can offer a disaster-type selector, but should **not** combine flood F1 and wildfire F1 into a single model-quality number. Keep model-specific evaluation methods, test sets, and claims separate.
-
-### Git collaboration
-
-Develop wildfire changes in a branch, e.g. `feature/wildfire-pipeline`, and open a pull request. Avoid changing the flood branch without coordination. Add installation notes, a minimal smoke-test command, and sample output to `wildfire/README.md`. Do not commit downloaded imagery, caches, virtual environments, sensitive machine paths, or massive intermediary files.
-
 ## Evaluation protocol and remaining work
 
 - **GFF:** Report per-class F1, macro-F1, official validation loss, and ideally flood IoU, per-event results, and representative predicted/actual maps. Respect the official ignored-pixel handling.
 - **SEN12 classifier:** Report acquisition-level accuracy, precision, recall, F1, and class balance separately from GFF segmentation/forecast scores.
-- **Wildfire:** Select metrics after verifying label semantics; likely spatial IoU/F1 and horizon-specific evaluation, alongside persistence comparison where meaningful.
+
 - **Comparability:** Compare models on the same split and tiles, with matching label masks, forecast horizons, and training budgets.
 - **Outstanding flood experiments:** Matched-extra-epochs GFF-only control, true validation contribution check on several locations beyond the current subset, output visualizations, untouched held-out test evaluation, and a clean-clone reproducibility test.
 - **Potential leakage:** Folder-disjoint SEN12 acquisitions do not automatically prove different spatial events; check event/region overlap explicitly. GFF's original published setup may use retrospective weather reanalysis, but the reduced-input mini-project configuration excludes weather channels, limiting this particular risk. Forecast-time assumptions still need documentation.
