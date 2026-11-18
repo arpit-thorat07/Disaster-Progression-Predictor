@@ -11,7 +11,6 @@ A deep-learning mini-project for predicting how **floods** and **wildfires** evo
 | Flood forecast baseline | Global Flood Forecasting (GFF) | Predict a future two-class flood/water map from pre-event radar, terrain, and lead time | Trained and validated |
 | Radar feature pretraining | SEN12-FLOOD | Classify whether a Sentinel-1 acquisition is associated with flooding | Trained and validated |
 | Flood forecast with transfer learning | GFF + pretrained SEN12-FLOOD encoder | Predict a future flood/water map using auxiliary radar features | Trained, validated, and ablated |
-| Wildfire forecast | TS-SatFire | Predict future fire/burn extent from earlier observations | Assigned to wildfire workstream; implementation pending |
 
 ## Flood models and results
 
@@ -125,7 +124,6 @@ Activate the environment if desired (`.venv\Scripts\Activate.ps1` in Windows Pow
 
 - **GFF:** Obtain the GFF dataset and prepare the layout expected by the official loader: `flood/data/GFF_official_view/rois/`, `partitions/`, and `normalisation/`. The local training dataset used an official-loader-compatible view of 298 GFF observations; this view must be recreated for a new machine.
 - **SEN12-FLOOD:** Obtain the raster dataset and place location folders under `flood/data/SEN12FLOOD/`. Build or reuse the manifest and folder-disjoint split files, checking that all CSV-relative paths resolve correctly.
-- **TS-SatFire:** The wildfire teammate should document their independently acquired dataset and target folder in `wildfire/README.md`.
 
 The checked-in paths should be resolved relative to the script or the repository directory, **not** to a developer-specific `C:\...` location. GFF YAML `data_folder` settings must be resolved consistently with Python path handling. Do not assume an arbitrary working directory. The prepared data and original runs are not redistributed as part of this README.
 
